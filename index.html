@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>The Graph Demo</title>
+
+  <!-- build:inlinejs -->
+  <script src="/bower_components/react/react.min.js"></script>
+  <script src="/bower_components/react/react-dom.min.js"></script>
+  <script type="text/javascript" src="./src/the-graph.js"></script>
+  <script type="text/javascript" src="./build/font-awesome-unicode-map.js"></script>
+  <script type="text/javascript" src="./src/the-graph-app.js"></script>
+  <script type="text/javascript" src="./src/the-graph-graph.js"></script>
+  <script type="text/javascript" src="./src/the-graph-node.js"></script>
+  <script type="text/javascript" src="./src/the-graph-node-menu.js"></script>
+  <script type="text/javascript" src="./src/the-graph-node-menu-port.js"></script>
+  <script type="text/javascript" src="./src/the-graph-node-menu-ports.js"></script>
+  <script type="text/javascript" src="./src/the-graph-port.js"></script>
+  <script type="text/javascript" src="./src/the-graph-edge.js"></script>
+  <script type="text/javascript" src="./src/the-graph-iip.js"></script>
+  <script type="text/javascript" src="./src/the-graph-group.js"></script>
+  <script type="text/javascript" src="./src/the-graph-tooltip.js"></script>
+  <script type="text/javascript" src="./src/the-graph-menu.js"></script>
+  <script type="text/javascript" src="./src/the-graph-clipboard.js"></script>
+  <!-- endbuild -->
+
+  <link rel="stylesheet" href="./themes/the-graph-dark.css">
+  <link rel="stylesheet" href="./themes/the-graph-light.css">
+
+  <style>
+    *,
+    *:before,
+    *:after {
+      box-sizing: content-box;
+    }
+
+    body {
+      height: 100vh;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  
+  <div id="svgcontainer"></div>
+
+  <script>
+  (function (context) {
+    "use strict";
+
+    var $ = document.querySelector.bind(document);
+    var $$ = document.querySelectorAll.bind(document);
+
+    function extendObject (target) {
+      if ("object" !== typeof target ||
+          Object.prototype.toString.call(target) === '[object Array]') {
+        throw TypeError("extendObject: target must be a plain object.");
+      }
+
+      Array.from(arguments).forEach(function(source) {
+        Object.keys(source).forEach(function(key) {
+          target[key] = source[key];
+        });
+      });
+
+      return target;
+    };
+
+    function App (config) {
+
+      var appView, graphView;
+
+      this.library = {};
+      this.pan = [0,0];
+      this.scale = 1;
+      this.selectedEdges = [];
+      this.selectedNodes = [];
+      this.graph = null;
+
+      config = extendObject({
+        graph: null,
+        width: 800,
+        height: 600,
+        minZoom: 0.15,
+        maxZoom: 15,
+        offsetX: 0,
+        offsetY: 0,
+        grid: 72,
+        snap: 36,
+        editable: true,
+        displaySelectionGroup: true,
+        forceSelection: false,
+        autolayout: true
+      }, config);
+
+      var autolayouter = klayNoflo.init({
+        onSuccess: applyAutolayout.bind(this),
+        workerScript: "./bower_components/klayjs/klay.js"
+      });
+
+      var svgcontainer = $('#svgcontainer');
+
+      this.changeTheme = function(theme) {
+
+        if (theme !== 'dark' && theme !== 'light') {
+          throw Error("Unsupported theme: " + theme);
+        }
+
+        svgcontainer.classList.remove('the-graph-dark', 'the-graph-light');
+        svgcontainer.classList.add('the-graph-' + theme);
+      };
+
+      this.fire = function(eventName, detail) {
+        var customEvent = new CustomEvent(eventName, { detail: detail });
+        svgcontainer.dispatchEvent(customEvent);
+      };
+
+      this.setup = function(graph) {
+
+        this.graph = graph;
+
+        // Listen for graph changes
+        this.graph.on('endTransaction', fireChanged.bind(this));
+
+        // Listen for changes triggering autolayout
+        if (config.autolayout) {
+          this.graph.on('addNode', triggerAutolayout.bind(this));
+          this.graph.on('removeNode', triggerAutolayout.bind(this));
+          this.graph.on('addInport', triggerAutolayout.bind(this));
+          this.graph.on('removeInport', triggerAutolayout.bind(this));
+          this.graph.on('addOutport', triggerAutolayout.bind(this));
+          this.graph.on('removeOutport', triggerAutolayout.bind(this));
+          this.graph.on('addEdge', triggerAutolayout.bind(this));
+          this.graph.on('removeEdge', triggerAutolayout.bind(this));
+        }
+
+        if (appView) {
+          // Remove previous instance
+          React.unmountComponentAtNode(svgcontainer);
+        }
+
+        svgcontainer.innerHTML = "";
+
+        appView = ReactDOM.render(
+          context.TheGraph.App({
+            graph: this.graph,
+            width: config.width,
+            height: config.height,
+            offsetY: config.offsetY,
+            offsetX: config.offsetX,
+            minZoom: config.minZoom,
+            maxZoom: config.maxZoom,
+            editable: config.editable,
+            displaySelectionGroup: config.displaySelectionGroup,
+            forceSelection: config.forceSelection,
+            library: this.library,
+            menus: this.menus,
+            onEdgeSelection: this.onEdgeSelection.bind(this),
+            onNodeSelection: this.onNodeSelection.bind(this),
+            onPanScale: this.onPanScale.bind(this),
+            getMenuDef: getMenuDef
+          }),
+          svgcontainer
+        );
+
+        graphView = appView.refs.graph;
+      };
+
+      this.triggerFit = function () {
+        if (appView) {
+          appView.triggerFit();
+        }
+      };
+
+      function applyAutolayout (layoutedGraph) {
+        var i, len, children, klayNode, nofloNode, klayChildren,
+            klayChild, idx, idSplit, expDirection, expKey;
+
+        this.graph.startTransaction('autolayout');
+
+        // Update original graph nodes with the
+        // new coordinates from KIELER graph
+        children = layoutedGraph.children.slice();
+
+        
+        for (i = 0, len = children.length; i < len; i++) {
+          klayNode = children[ i ];
+          nofloNode = this.graph.getNode(klayNode.id);
+
+          // Encode nodes inside groups
+          if (klayNode.children) {
+            klayChildren = klayNode.children;
+            for (idx in klayChildren) {
+              klayChild = klayChildren[ idx ];
+              if (klayChild.id) {
+                this.graph.setNodeMetadata(klayChild.id, {
+                  x: Math.round((klayNode.x + klayChild.x) / config.snap) * config.snap,
+                  y: Math.round((klayNode.y + klayChild.y) / config.snap) * config.snap,
+                });
+              }
+            }
+          }
+
+          // Encode nodes outside groups
+          if (nofloNode) {
+            this.graph.setNodeMetadata(klayNode.id, {
+              x: Math.round(klayNode.x / config.snap) * config.snap,
+              y: Math.round(klayNode.y / config.snap) * config.snap
+            });
+          } else {
+            // Find inport or outport
+            idSplit = klayNode.id.split('::');
+            expDirection = idSplit[0];
+            expKey = idSplit[1];
+
+            if (expDirection === 'inport' && this.graph.inports[expKey]) {
+              this.graph.setInportMetadata(expKey, {
+                x: Math.round(klayNode.x / config.snap) * config.snap,
+                y: Math.round(klayNode.y / config.snap) * config.snap
+              });
+            } else if (expDirection === 'outport' && this.graph.outports[expKey]) {
+              this.graph.setOutportMetadata(expKey, {
+                x: Math.round(klayNode.x / config.snap) * config.snap,
+                y: Math.round(klayNode.y / config.snap) * config.snap
+              });
+            }
+          }
+        }
+
+        this.graph.endTransaction('autolayout');
+
+        // Fit to window
+        this.triggerFit();
+      };
+
+      function fireChanged () {
+
+      };
+
+      function getMenuDef () {
+
+      };
+
+      function onEdgeSelection (itemKey, item, toggle) {
+        var index, isSelected, shallowClone;
+
+        if (itemKey === undefined) {
+          if (this.selectedEdges.length > 0) {
+            this.selectedEdges = [];
+          }
+          this.fire('edges', this.selectedEdges);
+          return;
+        }
+
+        if (toggle) {
+          index = this.selectedEdges.indexOf(item);
+          isSelected = (index !== -1);
+          shallowClone = this.selectedEdges.slice();
+          if (isSelected) {
+            shallowClone.splice(index, 1);
+          } else {
+            shallowClone.push(item);
+          }
+          this.selectedEdges = shallowClone;
+        } else {
+          this.selectedEdges = [ item ];
+        }
+
+        this.fire('edges', this.selectedEdges);
+      };
+
+      function onNodeSelection (itemKey, item, toggle) {
+        var index, isSelected;
+
+        if (itemKey === undefined) {
+          this.selectedNodes = [];
+        } else if (toggle) {
+          index = this.selectedNodes.indexOf(item);
+          isSelected = (index !== -1);
+          if (isSelected) {
+            this.selectedNodes.splice(index, 1);
+          } else {
+            this.selectedNodes.push(item);
+          }
+        } else {
+          this.selectedNodes = [item];
+        }
+      };
+
+      function onPanScale (x, y, scale) {
+        this.pan = [x, y];
+        this.scale = scale;
+      };
+
+      function triggerAutolayout (event) {
+        var graph = this.graph;
+        var portInfo = graphView ? graphView.portInfo : null;
+
+        // Calls the autolayouter
+        autolayouter.layout({
+          "graph": graph,
+          "portInfo": portInfo,
+          "direction": "RIGHT",
+          "options": {
+            "intCoordinates": true,
+            "algorithm": "de.cau.cs.kieler.klay.layered",
+            "layoutHierarchy": true,
+            "spacing": 36,
+            "borderSpacing": 20,
+            "edgeSpacingFactor": 0.2,
+            "inLayerSpacingFactor": 2.0,
+            "nodePlace": "BRANDES_KOEPF",
+            "nodeLayering": "NETWORK_SIMPLEX",
+            "edgeRouting": "POLYLINE",
+            "crossMin": "LAYER_SWEEP",
+            "direction": "RIGHT"
+          }
+        });
+      };
+
+    };
+  })(this);
+  </script>
+
+</body>
+</html>

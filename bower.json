@@ -1,0 +1,19 @@
+{
+  "name": "the-graph-demo",
+  "description": "",
+  "main": "index.html",
+  "license": "MIT",
+  "homepage": "",
+  "private": true,
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "test",
+    "tests"
+  ],
+  "dependencies": {
+    "klayjs-noflo": "^0.3.0",
+    "react": "^15.2.0"
+  }
+}
